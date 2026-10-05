@@ -31,8 +31,17 @@ Do not burn many calls retrying, and do not ask the user for Shopee credentials 
 Working routes, in order:
 
 1. **BigGo Malaysia** — `https://my.biggo.com/s/<url-encoded keyword>`
-   Fetches fine with ordinary curl/python. The HTML embeds an SSR JSON blob containing the
-   whole result list. Parse it:
+   **Use `scripts/biggo_search.py`** — it does everything below in one call:
+
+   ```
+   python3 scripts/biggo_search.py --limit 10 --json out.json --images /tmp/img "kw1" "kw2"
+   ```
+
+   Pass several keyword phrasings in one run (results are deduped across them), and `--images DIR`
+   to download each listing's own product image from the Shopee CDN for visual confirmation.
+
+   Manual route, if you need it: the page fetches fine with ordinary curl/python. The HTML embeds
+   an SSR JSON blob containing the whole result list. Parse it:
    - normalise the JS-escaped payload: `raw.replace('\\"','"').replace('\\u0026','&')`
    - locate `"list":[` and bracket-match to the closing `]`
    - `json.loads` that slice; keep entries whose `nindex` contains `shopee`
@@ -50,7 +59,26 @@ Working routes, in order:
 prices, which is a good fallback or cross-check, but it is flaky (403/timeout) and gives no
 structured price data.
 
-## 3. Reporting
+## 3. Where the result goes
+
+**Write the finished product info into the ROOT of the folder you researched** — the same folder
+as the video and its `IMG/`, named `shopee-product-match.md`. Not into `~/.hermes/workspace/`,
+not into `$HERMES_HOME` — the files belong with the source material so they travel with it.
+
+```
+<researched folder>/shopee-product-match.md
+```
+
+- One file per researched folder. Re-running the folder overwrites that file.
+- Keep it to the finding: product, identifying spec, keywords, listing links + prices, caveats.
+- Raw working files (BigGo HTML/JSON, listing images) stay in the scratch dir — do NOT leave them
+  inside the researched folder's root. If you must keep them beside the finding, use a subfolder
+  like `img/` or `raw/`.
+- On a batch run, write one file per folder as you go, and put the index/roll-up at the root of
+  the parent folder that holds the batch.
+- Report the absolute path you wrote so the user can open it directly.
+
+## 4. Reporting
 
 Give: the product in plain words plus the spec that identifies it (size range, material, mount
 type), the Malay + English keywords that find it, and 5-8 concrete listing links with prices and
