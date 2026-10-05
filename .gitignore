@@ -1,0 +1,79 @@
+# Hermes home (~/.hermes) — publish skills only.
+#
+# Default-deny: every entry at the Hermes home ROOT is ignored, then skills/
+# is opted back in. Anything new that Hermes drops at the root is therefore
+# ignored automatically — you never have to remember to add it here.
+# All paths below are root-anchored (leading "/") on purpose: an unanchored
+# "hermes-agent/" would also swallow skills/.../hermes-agent/, a real skill.
+
+/*
+!/.gitignore
+!/README.md
+!/skills/
+
+# Runtime metadata inside skills/ (usage stats, curator ledger, locks).
+# Hermes state, not skill content.
+skills/.*
+skills/**/.lock
+skills/**/*.lock
+
+# ---------------------------------------------------------------------------
+# Belt and braces: secrets and private state listed explicitly, so this file
+# still protects you if the default-deny rule above is ever relaxed.
+# ---------------------------------------------------------------------------
+
+# Live credentials
+/.env
+/auth.json
+/auth.lock
+/shared/
+/vault/
+/pairing/
+/install_id
+/.install_id.lock
+/gateway.lock
+/gateway.pid
+/gateway.sock
+/gateway-starts.log
+/gateway_state.json
+/channel_directory.json
+
+# Conversation history and personal data
+/sessions/
+/state.db
+/state.db-*
+/shared-state.db
+/kanban.db
+/kanban.db.*
+/memories/
+/logs/
+/cron/
+/migration/
+/workspace/
+/terminal-sessions/
+/pending_messages/
+/runtime/
+/state/
+/backups/
+/sandboxes/
+/images/
+/image_cache/
+/audio_cache/
+/cache/
+/.shared/
+/.hermes_history
+/interrupt_debug.log
+
+# Binaries / vendored checkout of the hermes-agent source
+/bin/
+/hermes-agent/
+
+# Caches and misc runtime files
+/models_dev_cache.json
+/models_dev_cache.etag
+/provider_models_cache.json
+/context_length_cache.yaml
+*.lock
+*.log
+*.pid
+*.sock
