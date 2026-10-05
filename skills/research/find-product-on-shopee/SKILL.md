@@ -55,6 +55,22 @@ Working routes, in order:
    from `origin_image` (send `Referer: https://shopee.com.my/`) and inspect it with `vision_analyze`
    to confirm the listing really is the product in the frame before recommending it.
 
+### When BigGo walls you (`verifylogin`)
+
+BigGo rate-limits by IP. After a few hundred requests in an hour every `/s/` URL 307-redirects to
+`my.biggo.com/verifylogin` (or answers `{"message":"Access denied"}` in a browser), and the same
+wall then hits any proxy that shares the reputation — `r.jina.ai` returns a Cloudflare 403, the free
+CORS proxies (`allorigins`, `codetabs`) 520/522, `search.brave.com` 429. Google serves its
+"unusual traffic" CAPTCHA, Bing/DDG/searx return no `shopee.com.my/product/...` URLs at all, and
+`web_extract` on a Shopee URL answers "page was reached but content could not be extracted".
+
+So: **do not thrash.** The identification half of the job still works while the search half is
+walled — run that, write the reports with the keyword lists, and fill in the listings later with
+`scripts/backfill_listings.py`, which re-reads each report's keywords and rewrites only the listings
+section once BigGo answers again (it prints `BLOCKED` and changes nothing while the wall is up).
+Space requests out (`BIGGO_MIN_GAP`, default 1.2 s) and keep concurrency at 2-3 — a burst is what
+sets the wall off.
+
 `web_search` also returns shopee.com.my `/list/...` and `/product/...` results with names and
 prices, which is a good fallback or cross-check, but it is flaky (403/timeout) and gives no
 structured price data.
@@ -78,7 +94,27 @@ not into `$HERMES_HOME` — the files belong with the source material so they tr
   the parent folder that holds the batch.
 - Report the absolute path you wrote so the user can open it directly.
 
-## 4. Reporting
+## 4. Batch runs (a whole folder set)
+
+`scripts/batch_product_match.py ROOT --only-missing --workers 3`
+
+Per folder it sends the sampled frames to the vision model, gets back JSON (English + Malay product
+name, category, look, use, 4-6 Shopee keywords, confidence, clearest frame), runs those keywords
+through `biggo_search.py`, writes `<folder>/shopee-product-match.md` and appends a row to
+`ROOT/_product-match-index.md`. It is resumable: `--only-missing` skips folders that already have a
+report. Read `ROOT/_batch-results.json` for the machine-readable roll-up, and check the
+low-confidence rows by eye before trusting them.
+
+Make the vision half free: point the auxiliary vision backend at a cheap/free model instead of
+paying the main model to look at pixels —
+`hermes config set auxiliary.vision.provider nous` +
+`hermes config set auxiliary.vision.model meituan/longcat-2.5-preview:free` +
+`hermes config set auxiliary.free_only true`. Verify in `state.db` (`session_model_usage`): the
+vision rows should read `cost $0.000000`, `billing_provider=nous`. Trade-off: the free VLM is slow
+(~25 s per call) and describes frames less sharply than a strong paid model, so keep the paid model
+for ambiguous folders.
+
+## 5. Reporting
 
 Give: the product in plain words plus the spec that identifies it (size range, material, mount
 type), the Malay + English keywords that find it, and 5-8 concrete listing links with prices and
