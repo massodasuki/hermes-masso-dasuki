@@ -57,7 +57,37 @@ Working routes, in order:
 
 ### When BigGo walls you (`verifylogin`)
 
-BigGo rate-limits by IP. After a few hundred requests in an hour every `/s/` URL 307-redirects to
+Two failure modes look identical (0 listings returned, exit code 0) — check both before concluding
+the wall is up:
+
+- **Jina 403s a spoofed browser User-Agent.** `r.jina.ai` only serves neutral clients: sending the
+  Chrome UA makes it answer `HTTP 403` and `biggo_search.py` then falls back to direct HTTP, which
+  is walled → 0 results. The proxy request must send `JINA_UA` (default `curl/8.5.0`), while the
+  direct BigGo/Shopee-CDN requests keep the browser UA. If a search that used to work suddenly
+  returns 0, test `curl -s -o /dev/null -w '%{http_code}' https://r.jina.ai/https://my.biggo.com/s/<kw>`
+  with and without a browser UA before blaming the IP wall.
+- **Direct HTTP returns the wall page**, not the SSR JSON: the body contains `verifylogin` and no
+  `"list":[`, so `parse_ssr` yields 0. Confirm with
+  `python3 -c "import urllib.request;b=urllib.request.urlopen(urllib.request.Request('https://my.biggo.com/s/kw',headers={'User-Agent':'Mozilla/5.0'})).read();print(b.count(b'verifylogin'))"`.
+
+**Jina's own ceiling is the real limit — measure it, don't fight it.** Unauthenticated `r.jina.ai`
+serves ~17 page fetches per minute per IP and *serialises* them: measured 0.27-0.38 req/s at 4, 20
+and 40 workers, versus 1.4 req/s from one thread doing sequential requests. Raising `--workers`
+therefore does not raise throughput, it only makes each folder slower (155 s/folder at 20 workers vs
+22 s at 4). Set `BIGGO_MIN_GAP` just under the ceiling (~1.2 s), keep workers at ~8, and accept
+~5 folders/min. `JINA_API_KEY` in the environment is sent as `Authorization: Bearer …` and lifts the
+ceiling substantially — ask the user for a free jina.ai key before committing to a multi-hour run.
+
+**A 429 must never look like "no results".** The throttle has to hold the configured gap *across
+threads* (a module-global `_last` without a lock lets N workers fire at once, Jina 429s the burst,
+and every one of those folders writes a report saying "no Shopee listings returned" — 923 of 1414
+folders in one run silently came out empty this way). `biggo_search.py` now guards the gap with a
+lock and retries 429/5xx with backoff; `batch_product_match.py` raises instead of writing a report
+when every keyword fetch fails, so the folder stays missing and a later pass retries it. When
+auditing a finished run, count `grep -rl 'no Shopee listings returned'` — a high count means the
+fetcher was throttled, not that the products have no listings.
+
+BigGo rate-limits by IP too. After a few hundred requests in an hour every `/s/` URL 307-redirects to
 `my.biggo.com/verifylogin` (or answers `{"message":"Access denied"}` in a browser), and the same
 wall then hits any proxy that shares the reputation — `r.jina.ai` returns a Cloudflare 403, the free
 CORS proxies (`allorigins`, `codetabs`) 520/522, `search.brave.com` 429. Google serves its
@@ -113,6 +143,15 @@ paying the main model to look at pixels —
 vision rows should read `cost $0.000000`, `billing_provider=nous`. Trade-off: the free VLM is slow
 (~25 s per call) and describes frames less sharply than a strong paid model, so keep the paid model
 for ambiguous folders.
+
+Throughput, measured: ~5 folders/min at `--workers 8` with `BIGGO_MIN_GAP=1.2`, so plan ~7-9 h per
+2,000 folders. Worker count is NOT the lever — Jina's per-IP fetch ceiling is (see the wall section
+below). The per-folder BigGo loop is serial, so only the fetch rate moves the needle.
+
+`batch_product_match.py` is NOT recursive and needs a `DIR/IMG` directly under the root it is
+given, so a nested tree (`Beauty/<folder>/IMG`, `Big Video/Pending/<folder>/IMG`) needs one run per
+level-one category, each with its own `_product-match-index.md`. It also overwrites the index and
+`_batch-results.json` on every run, so never give it a parent that also holds other batches.
 
 ## 5. Reporting
 

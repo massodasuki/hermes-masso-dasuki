@@ -123,11 +123,13 @@ def biggo(keywords: list[str], base: str, key: str) -> dict:
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)                                # type: ignore[union-attr]
     out: dict[str, list[dict]] = {}
-    for kw in keywords[:6]:
+    failed = 0
+    for kw in keywords[:3]:
         try:
             items = mod.search(kw)
         except Exception as e:                                  # noqa: BLE001
-            out[kw] = []
+            failed += 1
+            print(f"      !! biggo {kw!r}: {type(e).__name__}: {e}", flush=True)
             continue
         rows = []
         for it in items:
@@ -137,7 +139,10 @@ def biggo(keywords: list[str], base: str, key: str) -> dict:
             rows.append({"title": it.get("title"), "url": url, "price": it.get("price"),
                          "symbol": it.get("symbol"), "shop": (it.get("shop") or {}).get("name")})
         out[kw] = rows
-        time.sleep(0.5)
+    if failed and failed == min(3, len(keywords)) and not any(out.values()):
+        # every fetch errored — a rate-limited/blocked search, not "this product has no listing".
+        # Raise so process() leaves the folder without a report and a later pass retries it.
+        raise RuntimeError(f"all {failed} keyword fetches failed")
     return out
 
 
@@ -226,14 +231,18 @@ def process(folder: Path, base: str, key: str, dry: bool) -> dict:
     if not kws:
         kws = [ident.get("product_en") or "", ident.get("product_ms") or ""]
         kws = [k for k in kws if k]
-    results = {} if dry else biggo(kws, base, key)
+    try:
+        results = {} if dry else biggo(kws, base, key)
+    except Exception as e:                                       # noqa: BLE001
+        return {"folder": folder.name, "status": "search-failed", "detail": str(e)[:200],
+                "product_en": ident.get("product_en"), "confidence": ident.get("confidence"),
+                "secs": round(time.time() - t0, 1)}
     if not dry:
         write_report(folder, ident, results, raw)
     return {"folder": folder.name, "status": "ok", "product_en": ident.get("product_en"),
             "product_ms": ident.get("product_ms"), "confidence": ident.get("confidence"),
             "keywords": kws, "listings": len(best_listings(results)) if results else 0,
             "written": str(folder / OUT_NAME) if not dry else "", "secs": round(time.time() - t0, 1)}
-
 
 def main() -> int:
     ap = argparse.ArgumentParser()

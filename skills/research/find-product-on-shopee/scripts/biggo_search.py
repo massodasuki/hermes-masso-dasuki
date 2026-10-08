@@ -31,36 +31,87 @@ reach listings that English keywords miss.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 ITEM_RE = re.compile(r"/product/(\d+)/(\d+)")
 SHOPEE_IMG_RE = re.compile(r"(https://cf\.shopee\.com\.my/file/[^\"'\s]+)")
 JINA = "https://r.jina.ai/"
+JINA_UA = os.environ.get("JINA_UA", "curl/8.5.0")   # Jina 403s spoofed browser UAs
+JINA_KEY = os.environ.get("JINA_API_KEY", "")       # optional: lifts the per-IP rate ceiling
 MIN_GAP = float(os.environ.get("BIGGO_MIN_GAP", "1.2"))   # seconds between fetches
+CACHE_DIR = os.environ.get("BIGGO_CACHE", str(Path.home() / ".hermes/cache/scratch/biggo-cache"))
 _last = [0.0]
+_gate = threading.Lock()          # serialises the global gap across worker threads
 
 # one markdown link row, as rendered by Jina: [![Image 5: title](img)](https://my.biggo.com/r/?… "title")
 ROW_RE = re.compile(
     r'\[!\[Image \d+:\s*(?P<alt>.*?)\]\((?P<img>[^)]*)\)\]'
-    r'\((?P<href>https://my\.biggo\.com/r/\?[^)]*)\)',
-    re.S)
+    r'\((?P<href>https://my\.biggo\.com/r/\?[^)]*)\)'
+    r'(?:\s*"(?P<title>[^"]*)")?', re.S)
+
+
+def _clean_title(s: str | None) -> str:
+    """Jina alt text sometimes swallows image URLs / nested markdown links; strip them."""
+    t = s or ""
+    t = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", t)     # [text](url) -> text
+    t = re.sub(r"https?://\S+", "", t)
+    t = re.sub(r"\s*\|\s*", " | ", t)
+    return re.sub(r"\s+", " ", t).strip(" |,-")
+
 PRICE_RE = re.compile(r'(?:[\d.]+\s*(?:pcs|set|unit|pack)s?\s+)?(?:RM|MYR)\s*[\d.,]+(?:\s*~\s*RM?\s*[\d.,]+)?')
 
 
 def _throttle() -> None:
-    gap = time.time() - _last[0]
-    if gap < MIN_GAP:
-        time.sleep(MIN_GAP - gap)
-    _last[0] = time.time()
+    """Enforce MIN_GAP between fetches GLOBALLY.
+
+    The gap must hold across worker threads, otherwise N threads fire at once and Jina answers
+    429 for the whole burst — which read as "0 Shopee results" and quietly wrote empty reports.
+    """
+    with _gate:
+        gap = time.time() - _last[0]
+        if gap < MIN_GAP:
+            time.sleep(MIN_GAP - gap)
+        _last[0] = time.time()
+
+
+def _get(url: str, headers: dict | None = None, timeout: int = 90,
+         tries: int = 4) -> bytes:
+    """GET with retry/backoff. 429 and 5xx are transient here and must not be swallowed."""
+    hdrs = dict(headers or {})
+    delay = 5.0
+    last = ""
+    for attempt in range(tries):
+        _throttle()
+        try:
+            req = urllib.request.Request(url, headers=hdrs)
+            return urllib.request.urlopen(req, timeout=timeout).read()
+        except urllib.error.HTTPError as e:
+            last = f"HTTP {e.code}"
+            if e.code not in (429, 500, 502, 503, 504):
+                raise
+            ra = e.headers.get("Retry-After")
+            try:
+                delay = max(delay, float(ra)) if ra else delay
+            except ValueError:
+                pass
+        except Exception as e:                                   # noqa: BLE001
+            last = f"{type(e).__name__}: {e}"
+        if attempt < tries - 1:
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError(f"fetch failed after {tries} tries ({last}): {url}")
 
 
 def fetch(url: str, referer: str | None = None, timeout: int = 60) -> bytes:
@@ -68,22 +119,26 @@ def fetch(url: str, referer: str | None = None, timeout: int = 60) -> bytes:
     headers = {"User-Agent": UA, "Accept-Language": "en-MY,en;q=0.9"}
     if referer:
         headers["Referer"] = referer
-    req = urllib.request.Request(url, headers=headers)
-    _throttle()
-    return urllib.request.urlopen(req, timeout=timeout).read()
+    return _get(url, headers, timeout)
 
 
 def fetch_page(url: str) -> str:
-    """Fetch a BigGo search page. Jina proxy first, direct HTTP as fallback."""
+    """Fetch a BigGo search page. Jina proxy first, direct HTTP as fallback.
+
+    Jina rejects spoofed browser User-Agents with 403, so the proxy request must send a
+    neutral client UA. The direct BigGo request keeps the browser UA.
+    """
     if os.environ.get("BIGGO_FETCH", "jina") != "direct":
-        try:
-            _throttle()
-            req = urllib.request.Request(JINA + url, headers={"User-Agent": UA})
-            body = urllib.request.urlopen(req, timeout=90).read().decode("utf-8", "ignore")
-            if "purl=" in body:
-                return body
-        except Exception:                                        # noqa: BLE001
-            pass
+        for ua in (JINA_UA, None):
+            try:
+                hdrs = {"User-Agent": ua} if ua else {}
+                if JINA_KEY:
+                    hdrs["Authorization"] = "Bearer " + JINA_KEY
+                body = _get(JINA + url, hdrs, timeout=90).decode("utf-8", "ignore")
+                if "purl=" in body:
+                    return body
+            except Exception:                                    # noqa: BLE001
+                continue
     return fetch(url).decode("utf-8", "ignore")
 
 
@@ -111,7 +166,7 @@ def parse_markdown(md: str) -> list[dict]:
         if "shopee.com.my/product/" not in purl or purl in seen:
             continue
         seen.add(purl)
-        title = re.sub(r"\s+", " ", m.group("alt") or "").strip()
+        title = _clean_title(m.group("title")) or _clean_title(m.group("alt")) or "(title not captured)"
         price = _price_after(md, m.end())
         if not price:                                            # price can precede the row
             price = _price_after(md, max(0, m.start() - 400), 420)
@@ -165,12 +220,34 @@ def parse_ssr(html: str) -> list[dict]:
     return []
 
 
-def search(keyword: str) -> list[dict]:
+def _cache_path(keyword: str) -> Path:
+    h = hashlib.sha1(keyword.strip().lower().encode()).hexdigest()[:16]
+    return Path(CACHE_DIR) / f"{h}.json"
+
+
+def search(keyword: str, use_cache: bool = True) -> list[dict]:
+    """Search BigGo for one keyword, caching hits on disk (same keyword recurs across folders)."""
+    cp = _cache_path(keyword)
+    if use_cache:
+        try:
+            cached = json.loads(cp.read_text(encoding="utf-8"))
+            rows = cached.get("rows") if isinstance(cached, dict) else cached
+            if isinstance(rows, list):
+                return rows
+        except Exception:                                        # noqa: BLE001
+            pass
     url = "https://my.biggo.com/s/" + urllib.parse.quote(keyword)
     page = fetch_page(url)
     rows = parse_markdown(page) if "purl=" in page else []
     if not rows:
         rows = parse_ssr(page)
+    if rows and use_cache:
+        try:
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            cp.write_text(json.dumps({"keyword": keyword, "rows": rows}, ensure_ascii=False),
+                          encoding="utf-8")
+        except Exception:                                        # noqa: BLE001
+            pass
     return rows
 
 

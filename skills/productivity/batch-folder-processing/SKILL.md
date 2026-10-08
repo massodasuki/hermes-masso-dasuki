@@ -38,19 +38,38 @@ partially-built or already-processed one. When the user names a folder or path, 
 
 ## 3. Batch hygiene once the method is approved
 
-- **Write results out as you go**, one file per batch, to a durable workspace path under the
-  project (`~/.hermes/workspace/<project>/`). The scratch directory is pruned; a run that only
-  exists in context is lost to a timeout.
+- **Write results where the source lives, not into the agent's workspace.** Unless the user says
+  otherwise, each folder's finished finding goes into that folder's own root (one file per folder,
+  named for its content), with the roll-up index at the root of the batch parent. This user's
+  standing preference is explicit — research travels with the material it describes, not into
+  `~/.hermes/workspace/`. Reserve the workspace for material with no natural home; the scratch dir
+  is pruned, so never let it hold a run's only copy.
 - **Append a record per folder** to JSON/CSV with the folder path and the extracted fields, then
   dedupe, count and sort with Python against that file rather than reasoning over results in
   context. Sample a few lines back from disk to confirm the format before scaling up.
-- **Audit the count before answering**: collected records vs folders processed, both printed. A
-  declared total is a hard claim; re-read the file if the numbers disagree instead of going with
-  what you have.
-- **Keep reference data across folders**: products, listings and lookups repeat between folders, so
-  one shared candidate/cache file saves re-deriving the same answer per folder.
 - **Two outputs, not one**: a short curated report per batch for reading, plus the raw record file
   for machine use. Keep the raw file append-only so nothing is lost between batches.
+- **Audit coverage, not just failures**: count outputs produced against folders in the set and print
+  both. "44/44 succeeded" can still mean 44 of 57 folders done — the missing ones are the silent
+  failure mode of `--only-missing` and skip lists generally.
+- **Keep reference data across folders**: products, listings and lookups repeat between folders, so
+  one shared candidate/cache file saves re-deriving the same answer per folder.
+- **Make the batch resumable and idempotent**, not a single forward pass: a `--only-missing` flag
+  that skips folders already carrying their output, plus a roll-up index regenerated at the end.
+  A run killed at folder 40 of 57 must restart without redoing the first 40 — the remote service
+  underneath, not the loop, is what makes a batch expensive to repeat.
+- **Run it backgrounded with a completion notification, and read slow latency as saturation, not a
+  stall.** Per-item time can climb tenfold as a shared service throttles (25 s → 400 s observed on a
+  free tier); let the notification bring the ending rather than polling it.
+- **When one sub-step is blocked, ship the half that works.** Complete the pass that needs no
+  blocked resource, write the outputs with the missing section left explicit plus the inputs needed
+  to fill it later, and leave a silent retry job behind — a scheduled script that produces no output
+  until it actually succeeds, so it stays quiet while the block holds and reports when it clears.
+  Do not hold a whole batch hostage to one upstream wall.
+- **Verify any sub-step you delegated to a cheaper model.** When per-item identification is done by
+  an auxiliary or free model, spot-check a sample of rows with a *different* model or with the
+  original material in front of the main model — re-asking the model that produced the answer only
+  confirms its own bias. Note the confidence the model reported and eyeball the lowest rows.
 
 ## 4. Reporting convention
 

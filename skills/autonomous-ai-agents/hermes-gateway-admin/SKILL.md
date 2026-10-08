@@ -1,6 +1,6 @@
 ---
 name: hermes-gateway-admin
-description: "Administer the Hermes gateway systemd service."
+description: "Administer Hermes gateway services; inspect running agents."
 version: 1.0.0
 license: MIT
 platforms: [linux, macos]
@@ -11,7 +11,7 @@ metadata:
 
 # Hermes Gateway Admin
 
-Operating and troubleshooting the Hermes gateway as a long-running service (`hermes-gateway.service`, plus any other gateway process hosting the same agent). Covers state checks, stopping/restarting, and diagnosing duplicate platform pollers.
+Operating and troubleshooting the Hermes gateway as a long-running service (`hermes-gateway.service`, plus any other gateway process hosting the same agent). Covers state checks, stopping/restarting, diagnosing duplicate platform pollers, running more than one agent on one box, and identifying what Hermes processes and sessions are actually running.
 
 ## Hard rule: the gateway cannot stop itself
 
@@ -57,6 +57,44 @@ Diagnosis:
 2. Confirm the old gateway targets the same platform/token (inspect its config dir, e.g. `~/.openclaw/openclaw.json`, with any secret redacted).
 
 Fix: exactly one service must own each platform token. Stop AND disable the duplicate (see the detach recipe above — a plain `systemctl stop` from inside the gateway is blocked). When done, confirm the surviving gateway's logs go quiet: `journalctl --user -u hermes-gateway.service --since "1 min ago" --no-pager | grep -iE 'telegram|conflict'`.
+
+## More than one agent on one box
+
+Two supported topologies — both need **distinct bot credentials per agent**:
+
+- **Multiplexed (default).** One gateway process serves every profile. Create the profile (`hermes profile create <name>`), give it its own platform tokens, `hermes gateway restart` — the host gateway routes to both. `hermes gateway list` shows the served set.
+- **One process per profile.** Each profile can own `hermes-gateway-<name>.service`. Hermes now **refuses a named profile's `gateway install` / `gateway start` without `--force`**; to run one standalone, set `gateway.standalone: true` in `profiles/<name>/config.yaml` (a temporary shim) then `hermes -p <name> gateway install --force`.
+
+Hard rule, same mechanism as the duplicate poller: **no two gateways/profiles may share one platform account or bot token.** A second agent needs a second bot token (another @BotFather bot) or a different platform. `gateway.multiplex_profiles: true` is the supported value — `false` is retired and rewritten to `true`; never hand-edit config, use `hermes config set`.
+
+## Identify what is actually running
+
+```bash
+hermes gateway list          # gateways + served profiles
+hermes profile list          # profiles + per-profile gateway status
+systemctl --user list-units --type=service --all | grep -iE 'hermes|claw|gateway'
+ps -eo pid,etime,rss,cmd | grep -i hermes | grep -v grep
+```
+
+Distinguish a **gateway** (systemd-managed, appears in `hermes gateway list`) from an **interactive CLI session** (a `hermes` python process parented to a terminal, absent from `gateway list`). A user's foreground `hermes` session is theirs — safe to leave; closing it loses nothing because turns persist to `state.db`. To verify a suspect PID is a live agent (not a wrapper/idle stub) and read what it has been doing, see `references/session-inspection.md`.
+
+## Host power actions are blocked — hand them to the user
+
+Shutting down, rebooting, or powering off the host is on Hermes's **unconditional blocklist** and cannot be
+run by the agent at any approval level (`--yolo`, `approvals.mode=off`, cron approve mode all included):
+
+> BLOCKED (hardline): system shutdown/reboot. … run it yourself in a terminal outside the agent.
+
+So do not attempt it, however the request is phrased, and do not treat the refusal as something to work
+around. When asked, give the user the one-liner and stop:
+
+```bash
+systemctl poweroff      # or: shutdown -h now
+```
+
+Before handing it over, make shutdown safe to lose: confirm nothing is mid-write (sessions persist to
+`state.db`, checkpoints/commits are on their branch) and note any containers the session left running
+(`docker ps -a`) so the user knows what stops and what comes back.
 
 ## Reporting
 
