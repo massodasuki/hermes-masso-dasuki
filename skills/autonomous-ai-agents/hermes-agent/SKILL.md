@@ -108,6 +108,7 @@ Profiles use `~/.hermes/profiles/<name>/` with the same layout. When a profile i
 | Contributing code: adding tools, slash commands, tests | `references/contributor-guide.md` |
 | delegate_task "capped at N" reports | `references/delegate-task-concurrency-diagnosis.md` |
 | "Can app X use my Nous Portal subscription/OAuth?" | `references/portal-auth-for-third-party-apps.md` |
+| **Take a project from UAT-ready to production-ready** (registration/login, email verification, secrets, migrations, docker-compose, CI/CD) | `orchestrating-agent-teams` skill → `references/production-readiness.md` |
 | Connecting a messaging platform (Telegram, Discord, Slack, WhatsApp, …) | docs: `/user-guide/messaging` |
 
 The reference list above is not the feature list — it is the set of topics that
@@ -196,6 +197,40 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 - **For scheduled tasks**, use the `cronjob` tool instead of spawning — handles delivery and retry
 - **"delegate_task is capped at N" reports** — see `references/delegate-task-concurrency-diagnosis.md`. Three real cap paths in Hermes; if none fired, the model is self-limiting and rationalising it as "the runtime caps."
 - **"Can $external_app use my Nous Portal subscription / OAuth?"** — see `references/portal-auth-for-third-party-apps.md`. Walk the user through three layers (plugin-vs-app, what Portal actually exposes, local-broker-proxy option).
+
+## Production-readiness passes (auth, packaging, ops)
+
+When the ask is "make this project production ready" — registration, login, email verification,
+docker-compose, migrations, CI/CD — the working method is the parallel-wave pipeline in the
+`orchestrating-agent-teams` skill, and the step-by-step playbook (wave order, per-workstream
+checklists, the evidence bar for a production claim) is `references/production-readiness.md` in that
+skill. Load it before dispatching; the Hermes-specific mechanics are:
+
+- **Get the whole scope approved as ONE list first.** Every wave in that playbook changes the auth or
+  infrastructure model, and those are the changes that stop at the human gate — approve them together,
+  then run the waves in parallel.
+- **One wave per identity concern, one write target per child.** Registration, login, email
+  verification and password reset fail and are reviewed independently; a single "add auth" child
+  produces an untestable blob. Split them, and keep the shared pieces (the user/session entity, the
+  email transport interface, the API client) single-writer.
+- **Secrets never enter a child's context.** Briefs carry env var NAMES and `.env.example`
+  placeholders only. A child that needs a running secret reads it from the environment; one that prints
+  one has produced an incident. Grep the built artifacts for every secret value before you hand over.
+- **Isolate each task** (worktree + port block + its own database) — the auth waves all touch the same
+  migrations and the same fixtures, so two children in one tree reproduce each other's failures.
+- **Verify against the composed stack, not the dev servers.** `docker compose up` from a clean state
+  (no pre-existing volumes), then probe every service's healthcheck; then exercise each flow (register
+  a fresh address, pull the verification token out of the dev transport, follow the link, log in,
+  request a reset, log out) and read the resulting rows back. A 200 from an endpoint is not an email
+  flow working.
+- **A dev-identity scaffold is a production hole, and it is easy to forget.** Delete the helper module
+  and its banner in the same wave that lands real sessions — an unused "temporary" auth shortcut left
+  in the tree gets re-used.
+- **Read every gate's exit code**, and re-run them on the merged tree; the migration and image-build
+  gates are the ones a merge breaks silently.
+- **Optional: a `cronjob` uptime/health watch** after deploy. Remember cron output is only delivered to
+  a gateway-connected platform (Telegram, Discord, …) — a job scheduled from a plain CLI session is
+  saved but never messages you back.
 
 ## Surfaces (quick orientation)
 

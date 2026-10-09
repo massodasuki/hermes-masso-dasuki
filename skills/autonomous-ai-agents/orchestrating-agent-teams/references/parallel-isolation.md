@@ -24,7 +24,26 @@ cp apps/api/.env .worktrees/<TASK-ID>/apps/api/.env
 ```
 
 Give each task an offset of ~10 ports from a base (31000, 31010, 31020, ...) so API, web, and any
-debug port cannot drift into a neighbour. Write the allocation map to a committed JSON
+debug port cannot drift into a neighbour. Put the task's WEB port in its brief as well as its API
+port, and say explicitly not to use the shared default: a dev server binds its framework default
+(3002 for `next dev`, 5173 for Vite) unless the brief passes the port flag, and the port you left a
+demo server on for the human is taken too — so N children and your own demo all collide on one port.
+
+## Repairing the shared contract after the worktrees exist
+
+Discovering that a shared module lacks a capability does not mean re-cutting every worktree. Add it
+yourself (you are the single writer for shared files), commit it on the integration branch, then
+bring each already-created worktree onto that commit — a fast-forward, because children have not
+committed yet:
+
+```sh
+for t in <TASK-IDS>; do git -C ".worktrees/$t" merge --ff-only <integration-branch>; done
+# then confirm the capability really arrived in each tree
+grep -c 'export function <newFn>' .worktrees/<TASK-ID>/<shared-module>.ts
+```
+
+If a child has already committed on its branch, a plain merge replaces `--ff-only`; expect a real
+merge commit and resolve it as the single committer. Write the allocation map to a committed JSON
 (`.agent/tasks/allocations.json`) so a fresh session, or another orchestrator, can see which task
 owns which worktree, branch, port block and database.
 
@@ -38,6 +57,26 @@ Boot the app in the worktree against its own database and hit a health endpoint.
 looks exactly like a broken task: a DB step that connects to the wrong host or maintenance database
 can still print something that reads like success. Prove the task's DB carries the required
 extension (`SELECT postgis_version()`, or the equivalent) and that the app answers on its own port.
+
+**Read every line of the allocation report, not the first.** N near-identical per-task blocks hide
+the one task whose DB step failed, so a wave dispatched on a skimmed report contains a child that
+dies at boot for a reason unrelated to its task. A helper whose flags do not match the container
+(its default role vs the role that owns the database — `--pg-user <stack-user>`) prints its own
+FAILED status and carries on: fix the disposition before dispatch, and when the helper cannot be
+reused, create that database by hand from the same template and assert the extension.
+
+**When an allocated block collides with a service you started by hand** (a demo server for the
+human — the allocator cannot see it, so it hands the port out), do not move your demo mid-wave. Give
+the affected child one explicit free port inside its OWN block, name the port it must not bind, and
+carry that override into every command in its brief. A wave that half-starts on a bind error burns a
+whole child.
+
+## Before dispatch, re-check per-worktree env
+
+Copying the gitignored `.env` in is not enough — the copy still carries the MAIN checkout's database
+name and port, because those are in the file, not in the worktree. Rewrite the task keys (DB name,
+DB port, server port) in every worktree's copy and echo them back per task; a worktree left pointing
+at the shared database looks like a working allocation and quietly writes to the wrong place.
 
 ## Teardown, after the merge
 
